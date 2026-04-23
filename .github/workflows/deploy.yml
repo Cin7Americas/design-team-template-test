@@ -1,0 +1,94 @@
+name: Deploy Prototype
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  STORAGE_ACCOUNT: "stdesignprototypes"
+  FILE_SHARE: "prototypes"
+  RESOURCE_GROUP: "rg-design-prototypes"
+
+permissions:
+  contents: read
+  id-token: write
+
+# Allow only one concurrent deployment per repo
+concurrency:
+  group: "deploy-${{ github.repository }}"
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Generate project folder name
+        id: folder
+        run: |
+          # Use repo name as folder (lowercase, alphanumeric and dashes only)
+          FOLDER=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
+          echo "name=$FOLDER" >> $GITHUB_OUTPUT
+          echo "Project folder: $FOLDER"
+
+      - name: Get Storage Key
+        id: storage
+        run: |
+          KEY=$(az storage account keys list --account-name ${{ env.STORAGE_ACCOUNT }} --query "[0].value" -o tsv)
+          echo "::add-mask::$KEY"
+          echo "key=$KEY" >> $GITHUB_OUTPUT
+
+      - name: Clear existing project files
+        run: |
+          az storage file delete-batch \
+            --account-name ${{ env.STORAGE_ACCOUNT }} \
+            --account-key "${{ steps.storage.outputs.key }}" \
+            --source ${{ env.FILE_SHARE }} \
+            --pattern "${{ steps.folder.outputs.name }}/*" \
+            2>/dev/null || echo "No existing files to delete"
+
+      - name: Create project directory
+        run: |
+          az storage directory create \
+            --account-name ${{ env.STORAGE_ACCOUNT }} \
+            --account-key "${{ steps.storage.outputs.key }}" \
+            --share-name ${{ env.FILE_SHARE }} \
+            --name ${{ steps.folder.outputs.name }} \
+            2>/dev/null || echo "Directory exists"
+
+      - name: Upload to Azure File Share
+        run: |
+          az storage file upload-batch \
+            --account-name ${{ env.STORAGE_ACCOUNT }} \
+            --account-key "${{ steps.storage.outputs.key }}" \
+            --destination ${{ env.FILE_SHARE }}/${{ steps.folder.outputs.name }} \
+            --source dist/
+
+      - name: Deployment complete
+        run: |
+          echo "✅ Deployed to: https://ca-design-prototypes.thankfulwave-36f43db2.australiaeast.azurecontainerapps.io/${{ steps.folder.outputs.name }}/"
+          echo ""
+          echo "🔐 Access requires Cin7 login"
